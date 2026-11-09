@@ -36,5 +36,5 @@ build/
 
 ### Mac OS ###
 .DS_Store
-# bot state (contains ororo.tv session cookies)
+# bot database (users, words, statistics)
 data/

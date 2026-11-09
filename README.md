@@ -94,3 +94,28 @@ background, right after an import:
 
 Translations are kept in the database and reused on the next import, so each word is translated only once.
 Words that still have no translation are skipped (and retried on the next import); the bot says how many.
+
+## Deploy to Railway
+
+The repo is ready for [Railway](https://railway.com): `Dockerfile` builds one self-contained jar, `railway.json` tells
+Railway to use it, health-check `/health`, and restart the bot if it crashes.
+
+1. **Push** the latest code to GitHub.
+2. Railway → **New Project → Deploy from GitHub repo** → pick `ororotv_bot`. The first build takes a few minutes.
+3. Service → **Variables**: add
+   - `TELEGRAM_BOT_TOKEN` = your bot token
+   - `BOT_DATA_DIR` = `/data`
+   - optional: `ADMIN_USER_IDS`, `ANTHROPIC_API_KEY`, `MAX_NEW_WORDS_PER_DAY`, `MAX_IMPORTS_PER_DAY`
+4. Service → right-click → **Attach Volume**, mount path **`/data`**. Without it the database is wiped on every deploy.
+5. Service → **Settings → Networking → Generate Domain**. Railway gives an address like
+   `https://ororotvbot-production.up.railway.app` (if it asks for a port, use the one shown in the deploy logs:
+   "Mini App served on port …").
+6. Add the variable `WEBAPP_URL` = that `https://…` address. Railway redeploys; the **Words** button now opens the
+   Mini App from Railway. No more cloudflared.
+7. **Stop the bot in IntelliJ.** Two copies with the same token make Telegram reject both (`409 Conflict`).
+
+**Keeping your current data (optional):** stop the local bot first, then copy `data/bot.db` into the volume, e.g. with the
+Railway CLI (`railway ssh`) or by temporarily adding an import step. Otherwise the server starts with an empty database.
+
+Every push to GitHub redeploys automatically. Logs (`[user]`, `[import]`, `[limit]`) are in the service's
+**Deployments → View logs**. Back up the database from time to time (see `NICE_TO_HAVE.md`).

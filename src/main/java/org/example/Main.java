@@ -36,14 +36,16 @@ public class Main {
     }
 
     public static void main(String[] args) throws Exception {
-        String token = args.length > 0 ? args[0] : System.getProperty("TELEGRAM_BOT_TOKEN");
+        // -DTELEGRAM_BOT_TOKEN locally (IntelliJ VM options), TELEGRAM_BOT_TOKEN variable on Railway
+        String token = args.length > 0 ? args[0] : config("TELEGRAM_BOT_TOKEN", null);
         if (token == null || token.isBlank()) {
-            System.err.println("Set the TELEGRAM_BOT_TOKEN environment variable (token from @BotFather).");
+            System.err.println("Set TELEGRAM_BOT_TOKEN (token from @BotFather) as -D option or environment variable.");
             System.exit(1);
         }
         String dataDir = config("BOT_DATA_DIR", "data");
         String webAppUrl = config("WEBAPP_URL", null);
-        int webAppPort = Integer.parseInt(config("WEBAPP_PORT", "8080"));
+        // Railway (and most hosts) tell the app which port to listen on via PORT
+        int webAppPort = Integer.parseInt(config("WEBAPP_PORT", config("PORT", "8080")));
 
         String anthropicKey = config("ANTHROPIC_API_KEY", null);
         String defaultLang = config("TRANSLATION_LANG", "ru");
@@ -80,33 +82,52 @@ public class Main {
         QuizBot bot = new QuizBot(new OkHttpTelegramClient(token), db, webAppUrl, translators, defaultLang,
                 limits, adminIds);
 
-        WebAppServer webApp = null;
+        if (webAppUrl != null && !webAppUrl.startsWith("https://")) {
+            System.err.println("WEBAPP_URL must start with https:// (Telegram requires it).");
+            System.exit(1);
+        }
+        // The HTTP server always runs: it also answers the hosting platform's health check (/health).
+        WebAppServer webApp = new WebAppServer(webAppPort, token, bot);
+        webApp.start();
         if (webAppUrl != null) {
-            if (!webAppUrl.startsWith("https://")) {
-                System.err.println("WEBAPP_URL must start with https:// (Telegram requires it).");
-                System.exit(1);
-            }
-            webApp = new WebAppServer(webAppPort, token, bot);
-            webApp.start();
-            System.out.println("Mini App served on http://localhost:" + webAppPort + " -> " + webAppUrl);
+            System.out.println("Mini App served on port " + webAppPort + " -> " + webAppUrl);
         } else {
             System.out.println("""
                     *** WEBAPP_URL is not set, so the "Connect ororo.tv" Mini App is OFF. ***
-                    Only the dictionary-file import is offered. To turn the Mini App on, run a tunnel
-                    (e.g. `cloudflared tunnel --url http://localhost:8080`) and add
-                    -DWEBAPP_URL=https://<tunnel address> to the VM options.""");
+                    Only the dictionary-file import is offered. Set WEBAPP_URL to the public https:// address
+                    that forwards to port""" + " " + webAppPort + " (Railway domain, or a cloudflared tunnel locally).");
         }
         bot.installMenuButton();
 
-        try (TelegramBotsLongPollingApplication app = new TelegramBotsLongPollingApplication()) {
+        TelegramBotsLongPollingApplication app = new TelegramBotsLongPollingApplication();
+        try {
             app.registerBot(token, bot);
-            System.out.println("Bot started. Press Ctrl+C to stop.");
-            Thread.currentThread().join();
-        } finally {
-            if (webApp != null) {
-                webApp.stop();
-            }
+        } catch (Exception e) {
+            // Exit instead of running half-alive (web server up, bot dead): the host then reports a failed deploy.
+            System.err.println("Could not connect to Telegram (check TELEGRAM_BOT_TOKEN): " + e.getMessage());
+            webApp.stop();
             db.close();
+            System.exit(1);
         }
+
+        // Railway stops the old container with SIGTERM on every redeploy: finish work and close the database cleanly.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("Shutting down...");
+            try {
+                app.close();
+            } catch (Exception e) {
+                System.err.println("Stopping Telegram polling failed: " + e.getMessage());
+            }
+            webApp.stop();
+            bot.shutdown();
+            try {
+                db.close();
+            } catch (Exception e) {
+                System.err.println("Closing the database failed: " + e.getMessage());
+            }
+        }, "shutdown"));
+
+        System.out.println("Bot started. Press Ctrl+C to stop.");
+        Thread.currentThread().join();
     }
 }

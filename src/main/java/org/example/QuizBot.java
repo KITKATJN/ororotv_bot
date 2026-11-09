@@ -117,6 +117,18 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         this.adminIds = Set.copyOf(adminIds);
     }
 
+    /** Lets a running translation finish (up to 30 s) before the database is closed. */
+    public void shutdown() {
+        background.shutdown();
+        try {
+            if (!background.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                LOG.warn("Translation still running at shutdown; that import is lost.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     /**
      * Sets the bot's default menu button (next to the message field in every chat) to open the Mini App,
      * or resets it when the Mini App is off so a stale tunnel address is never shown.

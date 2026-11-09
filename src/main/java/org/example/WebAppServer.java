@@ -40,6 +40,11 @@ public class WebAppServer {
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/", this::handlePage);
         server.createContext("/api/import", this::handleImport);
+        server.createContext("/health", ex -> {
+            try (ex) {
+                send(ex, 200, "text/plain; charset=utf-8", "ok".getBytes(StandardCharsets.UTF_8));
+            }
+        });
         server.setExecutor(Executors.newFixedThreadPool(4));
     }
 
