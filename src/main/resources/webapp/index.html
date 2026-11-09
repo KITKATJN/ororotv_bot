@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ororo words</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #ffffff);
+      --text: var(--tg-theme-text-color, #111111);
+      --hint: var(--tg-theme-hint-color, #8a8a8a);
+      --card: var(--tg-theme-secondary-bg-color, #f2f2f5);
+      --accent: var(--tg-theme-button-color, #2f80ed);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --danger: var(--tg-theme-destructive-text-color, #d93a3a);
+      --link: var(--tg-theme-link-color, #2f80ed);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 20px 16px 32px;
+      background: var(--bg); color: var(--text);
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    p { margin: 0 0 12px; }
+    .hint { color: var(--hint); font-size: 14px; }
+    .card { background: var(--card); border-radius: 14px; padding: 16px; margin: 16px 0; }
+    label { display: block; font-size: 14px; color: var(--hint); margin: 12px 0 4px; }
+    input[type=email], input[type=password] {
+      width: 100%; padding: 12px; font-size: 16px; border-radius: 10px;
+      border: 1px solid color-mix(in srgb, var(--hint) 40%, transparent);
+      background: var(--bg); color: var(--text);
+    }
+    .check { display: flex; gap: 8px; align-items: center; color: var(--text); margin-top: 14px; }
+    button {
+      width: 100%; margin-top: 16px; padding: 13px; font-size: 16px; font-weight: 600;
+      border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-text); cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--link); font-weight: 500; margin-top: 8px; padding: 8px; }
+    button:disabled { opacity: .6; }
+    #status { min-height: 1.5em; margin-top: 12px; font-size: 15px; }
+    #status.error { color: var(--danger); }
+    details summary { cursor: pointer; font-weight: 600; }
+    ol { padding-left: 20px; margin: 8px 0 0; }
+    li { margin-bottom: 6px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Connect ororo.tv</h1>
+  <p class="hint">Load the words from your ororo.tv dictionary and start learning.</p>
+
+  <div id="saved" class="card" hidden>
+    <p>Signed in as <b id="savedEmail"></b></p>
+    <button id="refresh" type="button">Load my words</button>
+    <button id="forget" type="button" class="secondary">Use another account</button>
+  </div>
+
+  <form id="login" class="card" autocomplete="on">
+    <label for="email">ororo.tv email</label>
+    <input id="email" type="email" autocomplete="username" required>
+    <label for="password">ororo.tv password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <label class="check" id="rememberRow"><input id="remember" type="checkbox" checked> Remember on this device</label>
+    <button id="submit" type="submit">Load my words</button>
+    <p class="hint" style="margin-top:12px">Your password goes straight from this phone to ororo.tv.
+      The bot never receives it.</p>
+  </form>
+
+  <div id="status" role="status"></div>
+
+  <details class="card">
+    <summary>Signed up with Google?</summary>
+    <p class="hint" style="margin-top:8px">Google accounts have no ororo.tv password yet. Pick one:</p>
+    <ol>
+      <li>Set a password once, then use the form above and it's one tap from then on.
+        <button id="setPassword" type="button" class="secondary">Set an ororo.tv password</button></li>
+      <li>Or download your dictionary file and send it to the bot in the chat.
+        <button id="exportFile" type="button" class="secondary">Download dictionary file</button></li>
+    </ol>
+  </details>
+
+<script>
+(function () {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const API_HOSTS = ['https://front.ororo.tv', 'https://front.ororo-mirror.tv'];
+  const STORAGE_KEY = 'ororo_login';
+  const $ = (id) => document.getElementById(id);
+
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // ---- secure storage (device keychain, Telegram Bot API 9.0+) ----------------------------------
+  const secure = tg && tg.isVersionAtLeast && tg.isVersionAtLeast('9.0') && tg.SecureStorage ? tg.SecureStorage : null;
+
+  function storageGet() {
+    return new Promise((resolve) => {
+      if (!secure) return resolve(null);
+      try {
+        secure.getItem(STORAGE_KEY, (err, value) => resolve(err || !value ? null : safeParse(value)));
+      } catch (e) { resolve(null); }
+    });
+  }
+  function storageSet(value) {
+    return new Promise((resolve) => {
+      if (!secure) return resolve(false);
+      try { secure.setItem(STORAGE_KEY, JSON.stringify(value), (err) => resolve(!err)); }
+      catch (e) { resolve(false); }
+    });
+  }
+  function storageRemove() {
+    return new Promise((resolve) => {
+      if (!secure) return resolve();
+      try { secure.removeItem(STORAGE_KEY, () => resolve()); } catch (e) { resolve(); }
+    });
+  }
+  function safeParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+  // ---- ororo.tv API (called from the user's device) -------------------------------------------------
+  function base64Utf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    return btoa(bin);
+  }
+
+  async function fetchDictionary(email, password) {
+    const auth = 'Basic ' + base64Utf8(email + ':' + password);
+    let lastError = null;
+    for (const host of API_HOSTS) {
+      let response;
+      try {
+        response = await fetch(host + '/api/v2/dictionary', {
+          headers: { 'Authorization': auth, 'Accept': 'application/json' },
+          credentials: 'omit',
+        });
+      } catch (e) {
+        lastError = new Error('Could not reach ororo.tv. Check your connection.');
+        continue; // try the mirror
+      }
+      if (response.status === 401) {
+        const err = new Error('ororo.tv did not accept this email and password.');
+        err.badLogin = true;
+        throw err;
+      }
+      if (!response.ok) { lastError = new Error('ororo.tv answered with an error (HTTP ' + response.status + ').'); continue; }
+      return await response.text();
+    }
+    throw lastError || new Error('Could not reach ororo.tv.');
+  }
+
+  async function sendToBot(raw) {
+    const response = await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: tg ? tg.initData : '', data: raw }),
+    });
+    let result;
+    try { result = await response.json(); }
+    catch (e) { throw new Error('The bot server did not answer properly (HTTP ' + response.status + ').'); }
+    if (!result.ok) throw new Error(result.message || 'The bot could not import your words.');
+    return result;
+  }
+
+  // ---- UI -----------------------------------------------------------------------------------------
+  function setStatus(text, isError) {
+    $('status').textContent = text || '';
+    $('status').className = isError ? 'error' : '';
+  }
+  function setBusy(busy) {
+    ['submit', 'refresh'].forEach((id) => { $(id).disabled = busy; });
+  }
+  function showSaved(login) {
+    $('savedEmail').textContent = login.email;
+    $('saved').hidden = false;
+    $('login').hidden = true;
+  }
+  function showForm() {
+    $('saved').hidden = true;
+    $('login').hidden = false;
+  }
+
+  async function load(email, password, remember) {
+    setBusy(true);
+    setStatus('Loading your dictionary from ororo.tv…');
+    try {
+      const raw = await fetchDictionary(email, password);
+      setStatus('Sending your words to the bot…');
+      const result = await sendToBot(raw);
+      if (remember) await storageSet({ email: email, password: password });
+      setStatus(result.message);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      setTimeout(() => { if (tg) tg.close(); }, 1500);
+    } catch (e) {
+      setStatus(e.message, true);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+      if (e.badLogin) { await storageRemove(); $('email').value = email; showForm(); }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  $('login').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    load($('email').value.trim(), $('password').value, $('remember').checked && !!secure);
+  });
+  $('refresh').addEventListener('click', async () => {
+    const login = await storageGet();
+    if (login) load(login.email, login.password, false); else showForm();
+  });
+  $('forget').addEventListener('click', async () => { await storageRemove(); showForm(); setStatus(''); });
+
+  function openExternal(url) { if (tg) tg.openLink(url); else window.open(url, '_blank'); }
+  $('setPassword').addEventListener('click', () => openExternal('https://ororo.tv/en/users/password/new'));
+  $('exportFile').addEventListener('click', () => openExternal('https://ororo.tv/en/users/export_dictionary'));
+
+  // ---- start: one tap if we already know the login ----------------------------------------------------
+  if (!secure) $('rememberRow').hidden = true;
+  if (!tg || !tg.initData) setStatus('Open this page from the bot in Telegram.', true);
+
+  storageGet().then((login) => {
+    if (login && login.email && login.password) {
+      showSaved(login);
+      if (tg && tg.initData) load(login.email, login.password, false); // auto-load: tap the bot button, start learning
+    }
+  });
+})();
+</script>
+</body>
+</html>
