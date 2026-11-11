@@ -4,7 +4,8 @@ WORKDIR /app
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline
 COPY src ./src
-RUN mvn -B -q package -DskipTests
+# no -q here: if compilation fails, the compiler errors must show up in the build logs
+RUN mvn -B package -DskipTests
 
 # --- run: only a Java 21 runtime and the jar --------------------------------------------------------
 FROM eclipse-temurin:21-jre
