@@ -23,6 +23,7 @@ import java.util.Set;
  *   <li>{@code ANTHROPIC_API_KEY} - optional; enables context-aware translations with Claude
  *       (otherwise the free MyMemory service is used)</li>
  *   <li>{@code TRANSLATION_LANG} - translation language when the data doesn't say, default {@code ru}</li>
+ *   <li>{@code MYMEMORY_EMAIL} - contact e-mail sent to MyMemory: raises its free limit to ~50,000 characters a day</li>
  * </ul>
  * Settings are read as system properties ({@code -DNAME=value}) first, then environment variables.
  */
@@ -55,7 +56,11 @@ public class Main {
         if (anthropicKey != null) {
             translators.add(new ClaudeTranslator(anthropicKey));
         }
-        translators.add(new MyMemoryTranslator());
+        String myMemoryEmail = config("MYMEMORY_EMAIL", null);
+        translators.add(new MyMemoryTranslator(myMemoryEmail));
+        if (myMemoryEmail == null) {
+            System.out.println("MyMemory: anonymous (~5,000 characters/day). Set MYMEMORY_EMAIL for ~50,000.");
+        }
         System.out.println("Translations: " + (anthropicKey != null
                 ? "Claude, falling back to MyMemory"
                 : "MyMemory (free). Set ANTHROPIC_API_KEY for better, context-aware translations."));
@@ -80,7 +85,7 @@ public class Main {
                 + (adminIds.isEmpty() ? "none (set ADMIN_USER_IDS to use /admin)" : adminIds));
 
         QuizBot bot = new QuizBot(new OkHttpTelegramClient(token), db, webAppUrl, translators, defaultLang,
-                limits, adminIds);
+                limits, adminIds, new ExampleFinder());
 
         if (webAppUrl != null && !webAppUrl.startsWith("https://")) {
             System.err.println("WEBAPP_URL must start with https:// (Telegram requires it).");

@@ -31,6 +31,7 @@ Needs JDK 21+ and Maven. Settings are read as `-DNAME=value` system properties, 
 | `ADMIN_USER_IDS` | comma-separated Telegram user IDs allowed to use `/admin` (send `/admin` once to see your ID) |
 | `ANTHROPIC_API_KEY` | optional: translate words with Claude, using the subtitle line as context |
 | `TRANSLATION_LANG` | translation language if the data doesn't say (default `ru`) |
+| `MYMEMORY_EMAIL` | a real e-mail you read, sent to MyMemory: raises its free limit from ~5,000 to ~50,000 characters a day (shared by all users) |
 
 Telegram only opens Mini Apps over HTTPS. For local development, a free Cloudflare quick tunnel works:
 
@@ -93,7 +94,8 @@ background, right after an import:
 - **MyMemory** (free, no key): word-by-word machine translation, one or two variants. Used when there is no key,
   or for words Claude didn't return.
 
-Translations are kept in the database and reused on the next import, so each word is translated only once.
+Translations are kept in a `translations` table **shared by all users**: once any user has "ambiguous", nobody needs
+a translation call for it again. Answers translated back to English are cached there too.
 Words that still have no translation are skipped (and retried on the next import); the bot says how many.
 
 ## Deploy to Railway
@@ -133,3 +135,10 @@ to English:
 
 The **Menu** button next to the message field lists the commands (`/admin` appears only for admins). Telegram allows
 either a command list or a Mini App there, so the Mini App opens from the **📚 Connect ororo.tv** button instead.
+
+## Example sentences
+
+Words saved from a video come with the subtitle line (💬). Words without one (saved from ororo's translator page) get
+a short example sentence (📖) from [Tatoeba](https://tatoeba.org) — sentences © their authors, licensed
+[CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/). The sentence's translation is shown after you answer.
+Lookups are cached in the `examples` table (including "nothing found"), so each word is looked up once.

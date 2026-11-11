@@ -33,6 +33,12 @@ public class MyMemoryTranslator implements Translator {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    private final String email; // sent as "de": raises the daily limit from ~5,000 to ~50,000 characters
+
+    /** @param email contact address MyMemory can reach in case of problems, or null (anonymous, lower limit) */
+    public MyMemoryTranslator(String email) {
+        this.email = email == null || email.isBlank() ? null : email.strip();
+    }
 
     @Override
     public String name() {
@@ -66,7 +72,8 @@ public class MyMemoryTranslator implements Translator {
     /** Main translation plus up to two high-quality alternatives, lower-cased, without the source text. */
     private List<String> lookup(String text, String langPair) throws Exception {
         String url = "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(text, StandardCharsets.UTF_8)
-                + "&langpair=" + URLEncoder.encode(langPair, StandardCharsets.UTF_8);
+                + "&langpair=" + URLEncoder.encode(langPair, StandardCharsets.UTF_8)
+                + (email == null ? "" : "&de=" + URLEncoder.encode(email, StandardCharsets.UTF_8));
         HttpResponse<String> response = http.send(
                 HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -78,7 +85,10 @@ public class MyMemoryTranslator implements Translator {
         List<String> variants = new ArrayList<>();
         addVariant(variants, text, root.path("responseData").path("translatedText").asText(""));
         for (JsonNode match : root.path("matches")) {
-            if (match.path("quality").asInt(0) >= MIN_QUALITY) {
+            // Only alternatives for exactly this text: matches for longer phrases ("bored stiff" -> "до смерти")
+            // would teach the wrong meaning.
+            boolean sameText = match.path("segment").asText("").strip().equalsIgnoreCase(text.strip());
+            if (sameText && match.path("quality").asInt(0) >= MIN_QUALITY) {
                 addVariant(variants, text, match.path("translation").asText(""));
             }
         }

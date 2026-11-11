@@ -67,13 +67,14 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     private static final String COMMANDS = """
             Under each word: 💡 Hint shows the first letters, 🤷 Don't know shows the answer.
             All commands are in the Menu button next to the message field: /quiz, /stats, /sync (load or reload \
-            your words), /skip, /help.""";
+            your words), /skip, /help.
+            Example sentences come from tatoeba.org (CC BY 2.0 FR).""";
 
     private static final String CB_HINT = "hint";
     private static final String CB_SKIP = "skip";
 
     /** The word currently asked in a chat, the message that asked it, and how many hint letters were shown. */
-    private record Question(Database.QuizWord word, Integer messageId, int hintLetters) {
+    private record Question(Database.QuizWord word, Integer messageId, int hintLetters, ExampleFinder.Example example) {
     }
 
     private static final String WELCOME = """
@@ -116,6 +117,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     private final String defaultLang;
     private final Limits limits;
     private final Set<Long> adminIds;
+    private final ExampleFinder examples; // example sentences for words without a subtitle line; may be null
 
     private final Map<Long, Question> current = new ConcurrentHashMap<>();
     private final Set<Long> importing = ConcurrentHashMap.newKeySet();
@@ -130,7 +132,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
             DateTimeFormatter.ofPattern("d MMM HH:mm").withZone(ZoneId.systemDefault());
 
     public QuizBot(TelegramClient telegram, Database db, String webAppUrl, List<Translator> translators,
-                   String defaultLang, Limits limits, Set<Long> adminIds) {
+                   String defaultLang, Limits limits, Set<Long> adminIds, ExampleFinder examples) {
         this.telegram = telegram;
         this.db = db;
         this.webAppUrl = webAppUrl == null || webAppUrl.isBlank() ? null : webAppUrl;
@@ -138,6 +140,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         this.defaultLang = defaultLang;
         this.limits = limits;
         this.adminIds = Set.copyOf(adminIds);
+        this.examples = examples;
     }
 
     /** Lets a running translation finish (up to 30 s) before the database is closed. */
@@ -361,12 +364,21 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
             ImportPlan plan = new ImportPlan(chatId, source, incoming.size(), keep, updated, accepted,
                     fresh.size() - accepted.size(), lang);
 
-            List<WordEntry> missing = accepted.stream().filter(w -> !w.hasTranslation()).toList();
+            // Shared cache first: words another user already had cost no translation call.
+            List<WordEntry> untranslated = accepted.stream().filter(w -> !w.hasTranslation()).toList();
+            Map<String, String> cached = db.cachedTranslations(
+                    untranslated.stream().map(w -> Database.key(w.word())).toList(), "en>" + lang);
+            List<WordEntry> missing = untranslated.stream()
+                    .filter(w -> !cached.containsKey(Database.key(w.word()))).toList();
+            if (!cached.isEmpty()) {
+                LOG.info("[cache] chat {}: {} of {} translations from the shared cache",
+                        chatId, cached.size(), untranslated.size());
+            }
             if (missing.isEmpty() || translators.isEmpty()) {
-                return finishImport(plan, Map.of(), null);
+                return finishImport(plan, cached, cached.isEmpty() ? null : "cache");
             }
             send(chatId, "Got " + incoming.size() + " words. Translating " + missing.size() + " new ones, one moment...");
-            background.submit(() -> translateAndFinish(plan, missing));
+            background.submit(() -> translateAndFinish(plan, missing, cached));
             handedOff = true;
             return new ImportResult(true, "Got " + incoming.size() + " words! Translating " + missing.size()
                     + " new ones now; go back to the chat, the first word is on its way.");
@@ -377,20 +389,25 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         }
     }
 
-    private void translateAndFinish(ImportPlan plan, List<WordEntry> missing) {
-        Map<String, String> translated = new HashMap<>();
+    private void translateAndFinish(ImportPlan plan, List<WordEntry> missing, Map<String, String> cached) {
+        Map<String, String> translated = new HashMap<>(cached);
         Set<String> used = new LinkedHashSet<>();
+        if (!cached.isEmpty()) {
+            used.add("cache");
+        }
         List<WordEntry> todo = missing;
         for (Translator translator : translators) {
             if (todo.isEmpty()) {
                 break;
             }
             try {
-                Map<String, String> result = translator.translate(todo, plan.lang());
+                Map<String, String> result = new HashMap<>();
+                translator.translate(todo, plan.lang()).forEach((k, v) -> result.put(Database.key(k), v));
                 if (!result.isEmpty()) {
                     used.add(translator.name());
+                    db.saveTranslations(result, "en>" + plan.lang(), translator.name()); // for every other user
                 }
-                result.forEach((k, v) -> translated.put(Database.key(k), v));
+                translated.putAll(result);
             } catch (Exception e) {
                 LOG.warn("{} translation failed: {}", translator.name(), e.getMessage());
             }
@@ -495,11 +512,51 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         }
         String text = "Translate: " + next.word();
         String context = DictionaryParser.cleanContext(next.context());
+        ExampleFinder.Example example = null;
         if (context != null) {
-            text += "\n💬 " + context;
+            text += "\n💬 " + context;                       // the subtitle line it was saved from
+        } else {
+            example = exampleFor(next);
+            if (example != null) {
+                text += "\n📖 " + example.sentence();         // no subtitle: an example sentence instead
+            }
         }
         Integer messageId = send(chatId, text, questionButtons());
-        current.put(chatId, new Question(next, messageId, 0));
+        current.put(chatId, new Question(next, messageId, 0, example));
+    }
+
+    /**
+     * An example sentence for a word without a subtitle line: from the shared cache, or looked up once
+     * (at most a few seconds) and cached for everyone, including "nothing found".
+     */
+    private ExampleFinder.Example exampleFor(Database.QuizWord word) {
+        if (examples == null) {
+            return null;
+        }
+        try {
+            Database.CachedExample cached = db.cachedExample(word.key(), defaultLang);
+            if (cached != null) {
+                return cached.example();
+            }
+            ExampleFinder.Example found = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return examples.find(word.word(), defaultLang);
+                } catch (Exception e) {
+                    throw new CompletionException(e);
+                }
+            }, lookups).get(5, TimeUnit.SECONDS);
+            db.saveExample(word.key(), defaultLang, found);
+            return found;
+        } catch (Exception e) {
+            LOG.warn("Example lookup for '{}' failed: {}", word.word(), e.getMessage()); // not cached: retried later
+            return null;
+        }
+    }
+
+    /** "📖 It's lashing. — Льёт как из ведра." shown after the answer, when the example has a translation. */
+    private static String exampleLine(Question q) {
+        ExampleFinder.Example e = q.example();
+        return e == null || e.translation() == null ? "" : "\n📖 " + e.sentence() + " — " + e.translation();
     }
 
     private static InlineKeyboardMarkup questionButtons() {
@@ -528,7 +585,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         switch (cq.getData()) {
             case CB_HINT -> {
                 int letters = q.hintLetters() + 1;
-                current.put(chatId, new Question(q.word(), q.messageId(), letters));
+                current.put(chatId, new Question(q.word(), q.messageId(), letters, q.example()));
                 answerButton(cq, "💡 " + hint(q.word().translation(), letters), true);
             }
             case CB_SKIP -> {
@@ -564,7 +621,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         }
         removeButtons(chatId, q);
         db.recordAnswer(chatId, q.word().key(), Database.Result.SKIPPED);
-        send(chatId, "🤷 " + q.word().word() + " = " + q.word().translation());
+        send(chatId, "🤷 " + q.word().word() + " = " + q.word().translation() + exampleLine(q));
         askNextWord(chatId);
     }
 
@@ -593,15 +650,15 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         react(chatId, message.getMessageId(), correct ? "👍" : "👎");
         if (synonym) {
             send(chatId, "✅ Correct! \"" + answer.strip() + "\" works too (I'll remember it).\n"
-                    + word.word() + " = " + word.translation());
+                    + word.word() + " = " + word.translation() + exampleLine(q));
         } else if (correct) {
-            send(chatId, "✅ Correct! " + word.word() + " = " + word.translation());
+            send(chatId, "✅ Correct! " + word.word() + " = " + word.translation() + exampleLine(q));
         } else {
             String reply = "❌ Not quite. " + word.word() + " = " + word.translation();
             if (meaning != null) {
                 reply += "\n↩️ \"" + answer.strip() + "\" means: " + meaning;
             }
-            send(chatId, reply);
+            send(chatId, reply + exampleLine(q));
         }
         askNextWord(chatId);
     }
@@ -614,6 +671,16 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
 
     /** Back-translation with the first translator that answers, waiting at most a few seconds. */
     private String toEnglish(String text) {
+        String key = Database.key(text);
+        String direction = defaultLang + ">en";
+        try {
+            String cached = db.cachedTranslations(List.of(key), direction).get(key);
+            if (cached != null) {
+                return cached;
+            }
+        } catch (SQLException e) {
+            LOG.warn("Translation cache read failed: {}", e.getMessage());
+        }
         for (Translator translator : translators) {
             try {
                 String result = CompletableFuture.supplyAsync(() -> {
@@ -624,6 +691,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
                     }
                 }, lookups).get(6, TimeUnit.SECONDS);
                 if (result != null && !result.isBlank()) {
+                    db.saveTranslations(Map.of(key, result.strip()), direction, translator.name());
                     return result.strip();
                 }
             } catch (Exception e) {

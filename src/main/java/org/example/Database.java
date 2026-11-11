@@ -135,6 +135,25 @@ public class Database implements AutoCloseable {
                       word_key TEXT    NOT NULL,
                       at       INTEGER NOT NULL,
                       result   TEXT    NOT NULL)""");
+            // Shared by all users: a word is translated once for everybody ("en>ru"), and answers
+            // translated back to English are remembered too ("ru>en").
+            s.execute("""
+                    CREATE TABLE IF NOT EXISTS translations (
+                      text_key    TEXT    NOT NULL,
+                      direction   TEXT    NOT NULL,
+                      translation TEXT    NOT NULL,
+                      source      TEXT,
+                      created_at  INTEGER NOT NULL,
+                      PRIMARY KEY (text_key, direction))""");
+            // Example sentences (Tatoeba) for words that have no subtitle line; sentence NULL = none found.
+            s.execute("""
+                    CREATE TABLE IF NOT EXISTS examples (
+                      word_key    TEXT    NOT NULL,
+                      lang        TEXT    NOT NULL,
+                      sentence    TEXT,
+                      translation TEXT,
+                      fetched_at  INTEGER NOT NULL,
+                      PRIMARY KEY (word_key, lang))""");
             s.execute("CREATE INDEX IF NOT EXISTS imports_chat_at ON imports(chat_id, at)");
             s.execute("CREATE INDEX IF NOT EXISTS answers_chat_at ON answers(chat_id, at)");
             s.execute("CREATE INDEX IF NOT EXISTS answers_at ON answers(at)");
@@ -328,6 +347,78 @@ public class Database implements AutoCloseable {
             ps.setLong(1, now);
             ps.setLong(2, chatId);
             ps.setString(3, wordKey);
+            ps.executeUpdate();
+        }
+    }
+
+    // ------------------------------------------------- shared caches
+
+    /** Cached translations for these keys in one direction ("en>ru"); keys without one are absent. */
+    public synchronized Map<String, String> cachedTranslations(Collection<String> keys, String direction)
+            throws SQLException {
+        Map<String, String> out = new HashMap<>();
+        try (PreparedStatement ps = db.prepareStatement(
+                "SELECT translation FROM translations WHERE text_key=? AND direction=?")) {
+            for (String k : keys) {
+                ps.setString(1, k);
+                ps.setString(2, direction);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        out.put(k, rs.getString(1));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    public synchronized void saveTranslations(Map<String, String> byKey, String direction, String source)
+            throws SQLException {
+        try (PreparedStatement ps = db.prepareStatement("""
+                INSERT OR REPLACE INTO translations(text_key, direction, translation, source, created_at)
+                VALUES (?,?,?,?,?)""")) {
+            for (Map.Entry<String, String> e : byKey.entrySet()) {
+                ps.setString(1, e.getKey());
+                ps.setString(2, direction);
+                ps.setString(3, e.getValue());
+                ps.setString(4, source);
+                ps.setLong(5, now());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    /** A cached example lookup: {@code example} is null when we looked and found nothing. */
+    public record CachedExample(ExampleFinder.Example example) {
+    }
+
+    /** @return null when this word was never looked up for this language */
+    public synchronized CachedExample cachedExample(String wordKey, String lang) throws SQLException {
+        try (PreparedStatement ps = db.prepareStatement(
+                "SELECT sentence, translation FROM examples WHERE word_key=? AND lang=?")) {
+            ps.setString(1, wordKey);
+            ps.setString(2, lang);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                String sentence = rs.getString(1);
+                return new CachedExample(sentence == null ? null : new ExampleFinder.Example(sentence, rs.getString(2)));
+            }
+        }
+    }
+
+    public synchronized void saveExample(String wordKey, String lang, ExampleFinder.Example example)
+            throws SQLException {
+        try (PreparedStatement ps = db.prepareStatement("""
+                INSERT OR REPLACE INTO examples(word_key, lang, sentence, translation, fetched_at)
+                VALUES (?,?,?,?,?)""")) {
+            ps.setString(1, wordKey);
+            ps.setString(2, lang);
+            ps.setString(3, example == null ? null : example.sentence());
+            ps.setString(4, example == null ? null : example.translation());
+            ps.setLong(5, now());
             ps.executeUpdate();
         }
     }

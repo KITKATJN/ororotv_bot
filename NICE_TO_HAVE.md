@@ -23,6 +23,9 @@ Rough effort: 🟢 small (an hour or two) · 🟡 medium (a day) · 🔴 large (
 
 ## Words & sync with ororo.tv
 
+- [x] 🟢 **Shared translation cache** – one `translations` table for all users (done).
+- [x] 🟢 **Example sentences** for words without a subtitle line, from Tatoeba (done).
+- [ ] 🟡 **Offline dictionary** – English→Russian from Wiktionary (kaikki.org, CC BY-SA), checked before MyMemory/Claude: instant, free, unlimited, several translations per word.
 - [ ] 🟢 **Refresh reminder** – the bot can't refresh words on its own (the password stays on the phone), so remind users weekly to tap **Words**.
 - [ ] 🟡 **Sync learning status back to ororo.tv** – the site has statuses (well known / unsteady / poorly understood); check whether the API can set them.
 - [ ] 🟢 **`/export`** – send the user (or admin) a CSV of their words and stats.
@@ -51,3 +54,13 @@ Rough effort: 🟢 small (an hour or two) · 🟡 medium (a day) · 🔴 large (
 - [ ] 🟢 **Foreign keys** – declare the links between tables and turn on `PRAGMA foreign_keys=ON`.
 - [ ] 🟢 **Config file** – one `bot.properties` instead of many `-D` options.
 - [ ] 🟡 **Localized bot texts** – Russian / English interface, chosen from the user's Telegram language.
+
+## System design practice (interview prep)
+
+Not needed at today's size (one instance, SQLite), but each is a classic topic to build and then explain:
+
+- [ ] 🟡 **Redis as a cache in front of SQLite** – cache-aside, TTLs, LRU eviction, cache stampede; measure hit rate.
+- [ ] 🟡 **Redis rate limiter** – sliding-window counters for the per-user limits, so they work across several instances.
+- [ ] 🔴 **Run 2+ instances** – move SQLite → PostgreSQL, shared state (current question) → Redis, Telegram webhooks instead of long polling, a load balancer; discuss what breaks and why.
+- [ ] 🟡 **Background job queue** – translations/imports as jobs (Redis list or a `jobs` table) with retries and a worker.
+- [ ] 🟢 **Metrics & alerts** – latency of translators, cache hit rate, error rate; know the numbers when asked "how would you monitor this?".
