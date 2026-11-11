@@ -94,6 +94,18 @@ public class ClaudeTranslator implements Translator {
                 A learner of English typed this answer in the language with ISO code "%s": "%s"
                 Translate it into English: 1 to 3 common English words or phrases it means, most likely first,
                 separated by ", ". Reply with only the translations, no other text.""".formatted(fromLang, text);
+        return ask(prompt);
+    }
+
+    @Override
+    public String translateSentence(String sentence, String targetLang) throws Exception {
+        return ask("""
+                Translate this English example sentence into the language with ISO code "%s", naturally, as a
+                learner's dictionary would. Reply with only the translation, no other text.
+                %s""".formatted(targetLang, sentence));
+    }
+
+    private String ask(String prompt) throws Exception {
         MessageCreateParams params = MessageCreateParams.builder()
                 .model(MODEL)
                 .maxTokens(2000L)

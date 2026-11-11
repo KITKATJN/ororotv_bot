@@ -69,19 +69,16 @@ public class MyMemoryTranslator implements Translator {
         return variants.isEmpty() ? null : String.join(", ", variants);
     }
 
+    @Override
+    public String translateSentence(String sentence, String targetLang) throws Exception {
+        String result = request(sentence, "en|" + targetLang).path("responseData").path("translatedText").asText("");
+        // MyMemory returns the input unchanged (or in capitals) when it has nothing
+        return result.isBlank() || result.contains("&#") || result.equalsIgnoreCase(sentence) ? null : result.strip();
+    }
+
     /** Main translation plus up to two high-quality alternatives, lower-cased, without the source text. */
     private List<String> lookup(String text, String langPair) throws Exception {
-        String url = "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(text, StandardCharsets.UTF_8)
-                + "&langpair=" + URLEncoder.encode(langPair, StandardCharsets.UTF_8)
-                + (email == null ? "" : "&de=" + URLEncoder.encode(email, StandardCharsets.UTF_8));
-        HttpResponse<String> response = http.send(
-                HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).GET().build(),
-                HttpResponse.BodyHandlers.ofString());
-        JsonNode root = json.readTree(response.body());
-        if (response.statusCode() != 200 || root.path("quotaFinished").asBoolean(false)
-                || root.path("responseStatus").asInt(200) != 200) {
-            throw new UnavailableException(root.path("responseDetails").asText("HTTP " + response.statusCode()));
-        }
+        JsonNode root = request(text, langPair);
         List<String> variants = new ArrayList<>();
         addVariant(variants, text, root.path("responseData").path("translatedText").asText(""));
         for (JsonNode match : root.path("matches")) {
@@ -93,6 +90,21 @@ public class MyMemoryTranslator implements Translator {
             }
         }
         return variants.subList(0, Math.min(3, variants.size()));
+    }
+
+    private JsonNode request(String text, String langPair) throws Exception {
+        String url = "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(text, StandardCharsets.UTF_8)
+                + "&langpair=" + URLEncoder.encode(langPair, StandardCharsets.UTF_8)
+                + (email == null ? "" : "&de=" + URLEncoder.encode(email, StandardCharsets.UTF_8));
+        HttpResponse<String> response = http.send(
+                HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        JsonNode root = json.readTree(response.body());
+        if (response.statusCode() != 200 || root.path("quotaFinished").asBoolean(false)
+                || root.path("responseStatus").asInt(200) != 200) {
+            throw new UnavailableException(root.path("responseDetails").asText("HTTP " + response.statusCode()));
+        }
+        return root;
     }
 
     /**

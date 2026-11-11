@@ -35,7 +35,9 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -48,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Vocabulary trainer: sends a word from the user's ororo.tv dictionary (weak words more often), the
@@ -65,10 +68,10 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     private static final Logger LOG = LoggerFactory.getLogger("bot");
 
     private static final String COMMANDS = """
-            Under each word: 💡 Hint shows the first letters, 🤷 Don't know shows the answer.
+            Under each word: 💡 Hint shows a few letters (more on each tap), 🤷 Don't know shows the answer.
             All commands are in the Menu button next to the message field: /quiz, /stats, /sync (load or reload \
             your words), /skip, /help.
-            Example sentences come from tatoeba.org (CC BY 2.0 FR).""";
+            Example sentences come from tatoeba.org (CC BY 2.0 FR) and Wiktionary (CC BY-SA).""";
 
     private static final String CB_HINT = "hint";
     private static final String CB_SKIP = "skip";
@@ -538,15 +541,19 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
             if (cached != null) {
                 return cached.example();
             }
-            ExampleFinder.Example found = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<ExampleFinder.Example> lookup = CompletableFuture.supplyAsync(() -> {
                 try {
-                    return examples.find(word.word(), defaultLang);
+                    ExampleFinder.Example found = examples.find(word.word(), defaultLang);
+                    db.saveExample(word.key(), defaultLang, found); // cached even if the question went out without it
+                    return found;
                 } catch (Exception e) {
                     throw new CompletionException(e);
                 }
-            }, lookups).get(5, TimeUnit.SECONDS);
-            db.saveExample(word.key(), defaultLang, found);
-            return found;
+            }, lookups);
+            return lookup.get(6, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            LOG.info("Example lookup for '{}' is slow; asking without it, it will be cached", word.word());
+            return null;
         } catch (Exception e) {
             LOG.warn("Example lookup for '{}' failed: {}", word.word(), e.getMessage()); // not cached: retried later
             return null;
@@ -584,9 +591,10 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         }
         switch (cq.getData()) {
             case CB_HINT -> {
-                int letters = q.hintLetters() + 1;
-                current.put(chatId, new Question(q.word(), q.messageId(), letters, q.example()));
-                answerButton(cq, "💡 " + hint(q.word().translation(), letters), true);
+                int taps = q.hintLetters() + 1;
+                current.put(chatId, new Question(q.word(), q.messageId(), taps, q.example()));
+                // seed: the same letters stay revealed on every tap of this question, new ones are added
+                answerButton(cq, "💡 " + hint(q.word().translation(), taps, q.messageId()), true);
             }
             case CB_SKIP -> {
                 answerButton(cq, null, false);
@@ -596,18 +604,40 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         }
     }
 
-    /** "дв___________ (13 letters)": the first translation with the first {@code letters} letters shown. */
-    static String hint(String translation, int letters) {
+    /**
+     * "_ _ о _ _ _ _ н _  (9 letters)": the first translation with a few letters shown at random places.
+     * Tap 1 shows 1 letter, each further tap 2 more (3 for words over 8 letters); never the whole word.
+     * The same {@code seed} gives the same order, so earlier letters stay and new ones are added.
+     */
+    static String hint(String translation, int taps, long seed) {
         String first = translation.split("[,;/|\\n]")[0].replaceAll("\\(.*?\\)", "").strip();
-        int total = (int) first.chars().filter(Character::isLetter).count();
-        int reveal = Math.min(letters, Math.max(1, total - 1)); // never give the whole word away
+        List<Integer> letters = new ArrayList<>();
+        for (int i = 0; i < first.length(); i++) {
+            if (Character.isLetter(first.charAt(i))) {
+                letters.add(i);
+            }
+        }
+        int total = letters.size();
+        int step = total > 8 ? 3 : 2;
+        int reveal = Math.min(1 + (taps - 1) * step, Math.max(1, total - 1));
+
+        List<Integer> order = new ArrayList<>(letters);
+        Collections.shuffle(order, new Random(seed));
+        if (order.size() > 1 && order.get(0).equals(letters.get(0))) {
+            Collections.swap(order, 0, 1); // the first hint letter is never the word's first letter
+        }
+        Set<Integer> shown = new HashSet<>(order.subList(0, Math.min(reveal, order.size())));
+
         StringBuilder masked = new StringBuilder();
-        int seen = 0;
-        for (char c : first.toCharArray()) {
-            if (Character.isLetter(c)) {
-                masked.append(seen++ < reveal ? c : '_');
+        for (int i = 0; i < first.length(); i++) {
+            char c = first.charAt(i);
+            if (!Character.isLetter(c)) {
+                masked.append(c == ' ' ? "   " : c); // keep spaces (widened between words) and hyphens
             } else {
-                masked.append(c); // keep spaces and hyphens
+                masked.append(shown.contains(i) ? c : '_');
+                if (i + 1 < first.length() && Character.isLetter(first.charAt(i + 1))) {
+                    masked.append(' '); // "_ _ о _" - underscores run together otherwise
+                }
             }
         }
         return masked + "  (" + total + " letters)";

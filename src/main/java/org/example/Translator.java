@@ -22,4 +22,11 @@ public interface Translator {
      * @return "a, b" or null when there is no translation
      */
     String toEnglish(String text, String fromLang) throws Exception;
+
+    /**
+     * Translates a whole English sentence (an example sentence shown with a word).
+     *
+     * @return the translation, or null when there is none
+     */
+    String translateSentence(String sentence, String targetLang) throws Exception;
 }

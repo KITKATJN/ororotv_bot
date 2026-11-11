@@ -157,6 +157,17 @@ public class Database implements AutoCloseable {
             s.execute("CREATE INDEX IF NOT EXISTS imports_chat_at ON imports(chat_id, at)");
             s.execute("CREATE INDEX IF NOT EXISTS answers_chat_at ON answers(chat_id, at)");
             s.execute("CREATE INDEX IF NOT EXISTS answers_at ON answers(at)");
+
+            // One-off data fixes, numbered by PRAGMA user_version (0 for a new or old database).
+            int version;
+            try (ResultSet rs = s.executeQuery("PRAGMA user_version")) {
+                version = rs.next() ? rs.getInt(1) : 0;
+            }
+            if (version < 1) {
+                // v1: example lookups got more sources; look up again the words where nothing was found
+                s.execute("DELETE FROM examples WHERE sentence IS NULL");
+                s.execute("PRAGMA user_version = 1");
+            }
         }
     }
 

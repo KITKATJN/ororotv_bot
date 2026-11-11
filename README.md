@@ -54,7 +54,7 @@ Quick tunnels get a new address each run; for real users, host the bot on a serv
 | `/start`, `/help` | welcome message with the two load buttons |
 | `/quiz` | ask a word (words you get wrong come up more often) |
 | `/skip`, 🤷 **Don't know** button | reveal the answer and move on (counts as not known) |
-| 💡 **Hint** button | shows the first letters of the answer (one more letter per tap) |
+| 💡 **Hint** button | shows letters of the answer at random places: 1 on the first tap, 2–3 more on each next tap (never the whole word) |
 | `/stats` | your progress: today / all time, accuracy, streak, hardest words, words left for today |
 | `/sync` | the load buttons (**📚 Connect ororo.tv** opens the Mini App, **📥 Download dictionary file**) |
 | `/admin` | bot report for admins: users, imports, answers, most active users, recent imports |
@@ -139,6 +139,14 @@ either a command list or a Mini App there, so the Mini App opens from the **📚
 ## Example sentences
 
 Words saved from a video come with the subtitle line (💬). Words without one (saved from ororo's translator page) get
-a short example sentence (📖) from [Tatoeba](https://tatoeba.org) — sentences © their authors, licensed
-[CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/). The sentence's translation is shown after you answer.
+a short example sentence (📖), looked up in this order:
+
+1. [Tatoeba](https://tatoeba.org) sentence with a human translation;
+2. any Tatoeba sentence with the word;
+3. a usage example from Wiktionary, via the [Free Dictionary API](https://dictionaryapi.dev).
+
+Sentences without a human translation are translated by the translator (Claude or MyMemory). Tatoeba sentences are
+© their authors, [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/); Wiktionary is CC BY-SA.
+Only sentences with the exact word are used, so very rare words (e.g. "extortionary") may have none.
+The sentence's translation is shown after you answer.
 Lookups are cached in the `examples` table (including "nothing found"), so each word is looked up once.

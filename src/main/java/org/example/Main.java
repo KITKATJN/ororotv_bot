@@ -85,7 +85,7 @@ public class Main {
                 + (adminIds.isEmpty() ? "none (set ADMIN_USER_IDS to use /admin)" : adminIds));
 
         QuizBot bot = new QuizBot(new OkHttpTelegramClient(token), db, webAppUrl, translators, defaultLang,
-                limits, adminIds, new ExampleFinder());
+                limits, adminIds, new ExampleFinder(translators));
 
         if (webAppUrl != null && !webAppUrl.startsWith("https://")) {
             System.err.println("WEBAPP_URL must start with https:// (Telegram requires it).");
