@@ -88,6 +88,30 @@ public class ClaudeTranslator implements Translator {
         return parseJsonObject(text.toString());
     }
 
+    @Override
+    public String toEnglish(String text, String fromLang) throws Exception {
+        String prompt = """
+                A learner of English typed this answer in the language with ISO code "%s": "%s"
+                Translate it into English: 1 to 3 common English words or phrases it means, most likely first,
+                separated by ", ". Reply with only the translations, no other text.""".formatted(fromLang, text);
+        MessageCreateParams params = MessageCreateParams.builder()
+                .model(MODEL)
+                .maxTokens(2000L)
+                .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.LOW).build())
+                .addBeta("server-side-fallback-2026-07-01")
+                .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                .addUserMessage(prompt)
+                .build();
+        BetaMessage response = client.beta().messages().create(params);
+        if (response.stopReason().map(r -> r.equals(BetaStopReason.REFUSAL)).orElse(false)) {
+            return null;
+        }
+        StringBuilder out = new StringBuilder();
+        response.content().forEach(block -> block.text().ifPresent(t -> out.append(t.text())));
+        String result = out.toString().strip();
+        return result.isEmpty() ? null : result;
+    }
+
     private Map<String, String> parseJsonObject(String text) throws Exception {
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');

@@ -52,9 +52,10 @@ Quick tunnels get a new address each run; for real users, host the bot on a serv
 |---|---|
 | `/start`, `/help` | welcome message with the two load buttons |
 | `/quiz` | ask a word (words you get wrong come up more often) |
-| `/skip` | reveal the answer and move on (counts as not known) |
+| `/skip`, 🤷 **Don't know** button | reveal the answer and move on (counts as not known) |
+| 💡 **Hint** button | shows the first letters of the answer (one more letter per tap) |
 | `/stats` | your progress: today / all time, accuracy, streak, hardest words, words left for today |
-| `/sync` | the load buttons again, to refresh |
+| `/sync` | the load buttons (**📚 Connect ororo.tv** opens the Mini App, **📥 Download dictionary file**) |
 | `/admin` | bot report for admins: users, imports, answers, most active users, recent imports |
 | (send a file) | import a dictionary export file |
 
@@ -110,7 +111,7 @@ Railway to use it, health-check `/health`, and restart the bot if it crashes.
 5. Service → **Settings → Networking → Generate Domain**. Railway gives an address like
    `https://ororotvbot-production.up.railway.app` (if it asks for a port, use the one shown in the deploy logs:
    "Mini App served on port …").
-6. Add the variable `WEBAPP_URL` = that `https://…` address. Railway redeploys; the **Words** button now opens the
+6. Add the variable `WEBAPP_URL` = that `https://…` address. Railway redeploys; the **📚 Connect ororo.tv** button (in `/start` and `/sync`) now opens the
    Mini App from Railway. No more cloudflared.
 7. **Stop the bot in IntelliJ.** Two copies with the same token make Telegram reject both (`409 Conflict`).
 
@@ -119,3 +120,16 @@ Railway CLI (`railway ssh`) or by temporarily adding an import step. Otherwise t
 
 Every push to GitHub redeploys automatically. Logs (`[user]`, `[import]`, `[limit]`) are in the service's
 **Deployments → View logs**. Back up the database from time to time (see `NICE_TO_HAVE.md`).
+
+## Answer checking
+
+An answer is accepted when it matches one of the stored translations (case, punctuation and ё/е are ignored, one typo
+is allowed in longer words). If it doesn't match and is written in the learner's language, the bot translates it back
+to English:
+
+- back-translation gives the English word ("неоднозначный" → "ambiguous") → **accepted** as a synonym and remembered
+  for next time;
+- otherwise → ❌ plus what the answer actually means ("Незначительные" means: minor).
+
+The **Menu** button next to the message field lists the commands (`/admin` appears only for admins). Telegram allows
+either a command list or a Mini App there, so the Mini App opens from the **📚 Connect ororo.tv** button instead.

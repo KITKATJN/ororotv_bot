@@ -3,15 +3,21 @@ package org.example;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
+import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
 import org.telegram.telegrambots.meta.api.methods.menubutton.SetChatMenuButton;
 import org.telegram.telegrambots.meta.api.methods.reactions.SetMessageReaction;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageReplyMarkup;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Document;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.User;
-import org.telegram.telegrambots.meta.api.objects.menubutton.MenuButtonDefault;
-import org.telegram.telegrambots.meta.api.objects.menubutton.MenuButtonWebApp;
+import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
+import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeChat;
+import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeDefault;
+import org.telegram.telegrambots.meta.api.objects.menubutton.MenuButtonCommands;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.reactions.ReactionTypeEmoji;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
@@ -36,9 +42,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Vocabulary trainer: sends a word from the user's ororo.tv dictionary (weak words more often), the
@@ -55,8 +64,17 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     private static final long DAY = 24 * 3600;
     private static final Logger LOG = LoggerFactory.getLogger("bot");
 
-    private static final String COMMANDS =
-            "Commands: /quiz - next word, /skip - show the answer, /stats - your progress, /sync - reload words, /help";
+    private static final String COMMANDS = """
+            Under each word: 💡 Hint shows the first letters, 🤷 Don't know shows the answer.
+            All commands are in the Menu button next to the message field: /quiz, /stats, /sync (load or reload \
+            your words), /skip, /help.""";
+
+    private static final String CB_HINT = "hint";
+    private static final String CB_SKIP = "skip";
+
+    /** The word currently asked in a chat, the message that asked it, and how many hint letters were shown. */
+    private record Question(Database.QuizWord word, Integer messageId, int hintLetters) {
+    }
 
     private static final String WELCOME = """
             Hi! I quiz you on the words from your ororo.tv dictionary.
@@ -99,9 +117,14 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     private final Limits limits;
     private final Set<Long> adminIds;
 
-    private final Map<Long, Database.QuizWord> current = new ConcurrentHashMap<>();
+    private final Map<Long, Question> current = new ConcurrentHashMap<>();
     private final Set<Long> importing = ConcurrentHashMap.newKeySet();
-    private final ExecutorService background = Executors.newSingleThreadExecutor();
+    private final ExecutorService background = Executors.newSingleThreadExecutor(); // import translations
+    private final ExecutorService lookups = Executors.newCachedThreadPool(r -> { // answer back-translations
+        Thread t = new Thread(r, "lookup");
+        t.setDaemon(true);
+        return t;
+    });
     private final Random random = new Random();
     private final DateTimeFormatter timeFormat =
             DateTimeFormatter.ofPattern("d MMM HH:mm").withZone(ZoneId.systemDefault());
@@ -119,6 +142,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
 
     /** Lets a running translation finish (up to 30 s) before the database is closed. */
     public void shutdown() {
+        lookups.shutdownNow();
         background.shutdown();
         try {
             if (!background.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -130,23 +154,50 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     }
 
     /**
-     * Sets the bot's default menu button (next to the message field in every chat) to open the Mini App,
-     * or resets it when the Mini App is off so a stale tunnel address is never shown.
+     * Makes the Menu button next to the message field list all commands (admins also see /admin).
+     * The Mini App opens from the "Connect ororo.tv" button in /start and /sync instead: Telegram's menu
+     * button can be either the command list or a Mini App, not both.
      */
     public void installMenuButton() {
+        List<BotCommand> commands = List.of(
+                new BotCommand("quiz", "Next word"),
+                new BotCommand("stats", "Your progress"),
+                new BotCommand("sync", "Load or reload your ororo.tv words"),
+                new BotCommand("skip", "Show the answer and go on"),
+                new BotCommand("help", "How it works"));
+        List<BotCommand> adminCommands = new ArrayList<>(commands);
+        adminCommands.add(new BotCommand("admin", "Bot report"));
         try {
-            telegram.execute(SetChatMenuButton.builder()
-                    .menuButton(webAppUrl != null
-                            ? MenuButtonWebApp.builder().text("Words").webAppInfo(new WebAppInfo(webAppUrl)).build()
-                            : MenuButtonDefault.builder().build())
-                    .build());
+            telegram.execute(SetChatMenuButton.builder().menuButton(MenuButtonCommands.builder().build()).build());
+            telegram.execute(SetMyCommands.builder().commands(commands).scope(new BotCommandScopeDefault()).build());
         } catch (TelegramApiException e) {
-            LOG.warn("Could not set the menu button: {}", e.getMessage());
+            LOG.warn("Could not set the command menu: {}", e.getMessage());
+        }
+        for (Long admin : adminIds) {
+            try {
+                telegram.execute(SetMyCommands.builder().commands(adminCommands)
+                        .scope(new BotCommandScopeChat(String.valueOf(admin))).build());
+            } catch (TelegramApiException e) {
+                LOG.warn("Could not set admin commands for {} (has the admin started the bot?): {}",
+                        admin, e.getMessage());
+            }
         }
     }
 
     @Override
     public synchronized void consume(Update update) {
+        if (update.hasCallbackQuery() && update.getCallbackQuery().getMessage() != null) {
+            CallbackQuery cq = update.getCallbackQuery();
+            long chatId = cq.getMessage().getChatId();
+            try {
+                rememberUser(chatId, cq.getFrom());
+                handleButton(cq);
+            } catch (Exception e) {
+                LOG.error("Failed to handle a button in chat {}", chatId, e);
+                answerButton(cq, "Something went wrong, please try again.", false);
+            }
+            return;
+        }
         if (!update.hasMessage()) {
             return;
         }
@@ -210,9 +261,17 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
             case "/quiz", "/word", "/next" -> askNextWord(chatId);
             case "/skip" -> skip(chatId);
             case "/stats" -> send(chatId, formatUserStats(chatId));
-            case "/admin" -> send(chatId, adminIds.contains(chatId)
-                    ? formatAdminReport()
-                    : "This command is only for the bot admin. (Your Telegram ID is " + chatId + ".)");
+            case "/admin" -> {
+                if (adminIds.contains(chatId)) {
+                    send(chatId, formatAdminReport());
+                } else if (adminIds.isEmpty()) {
+                    send(chatId, "No admin is set up for this bot yet. To make yourself admin, set the variable "
+                            + "ADMIN_USER_IDS=" + chatId + " where the bot runs (Railway: service → Variables) "
+                            + "and restart it.");
+                } else {
+                    send(chatId, "This command is only for the bot admin. (Your Telegram ID is " + chatId + ".)");
+                }
+            }
             default -> send(chatId, "Unknown command. Try /help");
         }
     }
@@ -408,6 +467,7 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
     /**
      * Picks the next word, favouring weak words: never-asked words and words answered wrong come up
      * more often, well-known words less. The word just asked is never repeated immediately.
+     * The question comes with "Hint" and "Don't know" buttons.
      */
     private void askNextWord(long chatId) throws SQLException {
         List<Database.QuizWord> words = db.activeWords(chatId);
@@ -415,12 +475,12 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
             send(chatId, "No words yet. Load them first:", loadButtons());
             return;
         }
-        Database.QuizWord previous = current.get(chatId);
+        Question previous = current.get(chatId);
         double[] weights = new double[words.size()];
         double total = 0;
         for (int i = 0; i < words.size(); i++) {
             Database.QuizWord w = words.get(i);
-            boolean repeat = words.size() > 1 && previous != null && w.key().equals(previous.key());
+            boolean repeat = words.size() > 1 && previous != null && w.key().equals(previous.word().key());
             weights[i] = repeat ? 0 : weight(w);
             total += weights[i];
         }
@@ -433,12 +493,21 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
                 break;
             }
         }
-        current.put(chatId, next);
         String text = "Translate: " + next.word();
-        if (next.context() != null) {
-            text += "\n💬 " + next.context();
+        String context = DictionaryParser.cleanContext(next.context());
+        if (context != null) {
+            text += "\n💬 " + context;
         }
-        send(chatId, text);
+        Integer messageId = send(chatId, text, questionButtons());
+        current.put(chatId, new Question(next, messageId, 0));
+    }
+
+    private static InlineKeyboardMarkup questionButtons() {
+        return InlineKeyboardMarkup.builder()
+                .keyboardRow(new InlineKeyboardRow(
+                        InlineKeyboardButton.builder().text("💡 Hint").callbackData(CB_HINT).build(),
+                        InlineKeyboardButton.builder().text("🤷 Don't know").callbackData(CB_SKIP).build()))
+                .build();
     }
 
     static double weight(Database.QuizWord w) {
@@ -448,32 +517,148 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         return (1.0 + 2.0 * w.wrong()) / (1.0 + w.correct());
     }
 
+    /** Button presses under a question. Presses on an older question are ignored. */
+    private void handleButton(CallbackQuery cq) throws SQLException {
+        long chatId = cq.getMessage().getChatId();
+        Question q = current.get(chatId);
+        if (q == null || q.messageId() == null || !q.messageId().equals(cq.getMessage().getMessageId())) {
+            answerButton(cq, "This word is already done.", false);
+            return;
+        }
+        switch (cq.getData()) {
+            case CB_HINT -> {
+                int letters = q.hintLetters() + 1;
+                current.put(chatId, new Question(q.word(), q.messageId(), letters));
+                answerButton(cq, "💡 " + hint(q.word().translation(), letters), true);
+            }
+            case CB_SKIP -> {
+                answerButton(cq, null, false);
+                skip(chatId);
+            }
+            default -> answerButton(cq, null, false);
+        }
+    }
+
+    /** "дв___________ (13 letters)": the first translation with the first {@code letters} letters shown. */
+    static String hint(String translation, int letters) {
+        String first = translation.split("[,;/|\\n]")[0].replaceAll("\\(.*?\\)", "").strip();
+        int total = (int) first.chars().filter(Character::isLetter).count();
+        int reveal = Math.min(letters, Math.max(1, total - 1)); // never give the whole word away
+        StringBuilder masked = new StringBuilder();
+        int seen = 0;
+        for (char c : first.toCharArray()) {
+            if (Character.isLetter(c)) {
+                masked.append(seen++ < reveal ? c : '_');
+            } else {
+                masked.append(c); // keep spaces and hyphens
+            }
+        }
+        return masked + "  (" + total + " letters)";
+    }
+
     private void skip(long chatId) throws SQLException {
-        Database.QuizWord word = current.get(chatId);
-        if (word == null) {
+        Question q = current.get(chatId);
+        if (q == null) {
             send(chatId, "No active word. Use /quiz.");
             return;
         }
-        db.recordAnswer(chatId, word.key(), Database.Result.SKIPPED);
-        send(chatId, "⏭ " + word.word() + " = " + word.translation());
+        removeButtons(chatId, q);
+        db.recordAnswer(chatId, q.word().key(), Database.Result.SKIPPED);
+        send(chatId, "🤷 " + q.word().word() + " = " + q.word().translation());
         askNextWord(chatId);
     }
 
     private void handleAnswer(long chatId, Message message, String answer) throws SQLException {
-        Database.QuizWord word = current.get(chatId);
-        if (word == null) {
+        Question q = current.get(chatId);
+        if (q == null) {
             send(chatId, "Send /quiz to get a word (or /help).");
             return;
         }
+        Database.QuizWord word = q.word();
         boolean correct = AnswerChecker.isCorrect(answer, word.translation());
+        String meaning = null;
+        boolean synonym = false;
+        if (!correct && isInLearnerLanguage(answer)) {
+            // Translate the answer back to English: it may be a synonym we didn't know about,
+            // and if it's wrong, the learner sees what they actually said.
+            meaning = toEnglish(answer.strip());
+            if (meaning != null && AnswerChecker.isCorrect(word.word(), meaning)) {
+                correct = true;
+                synonym = true;
+                db.addTranslationVariant(chatId, word.key(), answer.strip().toLowerCase());
+            }
+        }
+        removeButtons(chatId, q);
         db.recordAnswer(chatId, word.key(), correct ? Database.Result.CORRECT : Database.Result.WRONG);
         react(chatId, message.getMessageId(), correct ? "👍" : "👎");
-        if (correct) {
+        if (synonym) {
+            send(chatId, "✅ Correct! \"" + answer.strip() + "\" works too (I'll remember it).\n"
+                    + word.word() + " = " + word.translation());
+        } else if (correct) {
             send(chatId, "✅ Correct! " + word.word() + " = " + word.translation());
         } else {
-            send(chatId, "❌ Not quite. " + word.word() + " = " + word.translation());
+            String reply = "❌ Not quite. " + word.word() + " = " + word.translation();
+            if (meaning != null) {
+                reply += "\n↩️ \"" + answer.strip() + "\" means: " + meaning;
+            }
+            send(chatId, reply);
         }
         askNextWord(chatId);
+    }
+
+    /** True when the answer contains non-Latin letters (e.g. Cyrillic), i.e. it's worth translating back. */
+    static boolean isInLearnerLanguage(String text) {
+        return text.strip().length() >= 2 && text.codePoints().anyMatch(cp -> Character.isLetter(cp)
+                && Character.UnicodeScript.of(cp) != Character.UnicodeScript.LATIN);
+    }
+
+    /** Back-translation with the first translator that answers, waiting at most a few seconds. */
+    private String toEnglish(String text) {
+        for (Translator translator : translators) {
+            try {
+                String result = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return translator.toEnglish(text, defaultLang);
+                    } catch (Exception e) {
+                        throw new CompletionException(e);
+                    }
+                }, lookups).get(6, TimeUnit.SECONDS);
+                if (result != null && !result.isBlank()) {
+                    return result.strip();
+                }
+            } catch (Exception e) {
+                LOG.warn("{} back-translation failed: {}", translator.name(), e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    /** Takes the Hint / Don't know buttons off a question that is finished. */
+    private void removeButtons(long chatId, Question q) {
+        if (q.messageId() == null) {
+            return;
+        }
+        try {
+            telegram.execute(EditMessageReplyMarkup.builder()
+                    .chatId(String.valueOf(chatId))
+                    .messageId(q.messageId())
+                    .replyMarkup(null)
+                    .build());
+        } catch (TelegramApiException e) {
+            LOG.debug("Could not remove buttons: {}", e.getMessage());
+        }
+    }
+
+    private void answerButton(CallbackQuery cq, String text, boolean alert) {
+        try {
+            telegram.execute(AnswerCallbackQuery.builder()
+                    .callbackQueryId(cq.getId())
+                    .text(text)
+                    .showAlert(alert)
+                    .build());
+        } catch (TelegramApiException e) {
+            LOG.debug("Could not answer button press: {}", e.getMessage());
+        }
     }
 
     // --------------------------------------------------------------- stats
@@ -562,15 +747,18 @@ public class QuizBot implements LongPollingSingleThreadUpdateConsumer {
         send(chatId, text, null);
     }
 
-    private void send(long chatId, String text, InlineKeyboardMarkup keyboard) {
+    /** @return the id of the sent message, or null if sending failed */
+    private Integer send(long chatId, String text, InlineKeyboardMarkup keyboard) {
         try {
-            telegram.execute(SendMessage.builder()
+            Message sent = telegram.execute(SendMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .text(text)
                     .replyMarkup(keyboard)
                     .build());
+            return sent == null ? null : sent.getMessageId();
         } catch (TelegramApiException e) {
             LOG.warn("Could not send message to {}: {}", chatId, e.getMessage());
+            return null;
         }
     }
 }

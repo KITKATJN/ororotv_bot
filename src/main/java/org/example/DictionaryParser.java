@@ -194,11 +194,23 @@ public final class DictionaryParser {
         return cells;
     }
 
+    /**
+     * The subtitle line, or null when there is none. Words saved from ororo's translator page come with
+     * a context like "English => Russian", which is not a sentence and is dropped.
+     */
+    public static String cleanContext(String context) {
+        if (context == null || context.isBlank()
+                || context.strip().matches("(?i)[\\p{L} ]{2,30}\\s*=>\\s*[\\p{L} ]{2,30}")) {
+            return null;
+        }
+        return context.strip();
+    }
+
     private static void add(List<WordEntry> out, String word, String translation, String context) {
         if (word == null || word.isBlank()) {
             return;
         }
-        String ctx = context == null || context.isBlank() ? null : context.strip();
+        String ctx = cleanContext(context);
         out.add(new WordEntry(word.strip(), translation == null ? "" : translation.strip(), ctx));
     }
 }

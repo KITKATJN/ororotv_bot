@@ -3,6 +3,7 @@ package org.example;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -23,6 +24,13 @@ public class MyMemoryTranslator implements Translator {
 
     private static final int MIN_QUALITY = 70; // drops the crowd-sourced junk MyMemory mixes into "matches"
 
+    /** Quota used up or service down: stop asking for the rest of this batch. */
+    private static class UnavailableException extends IOException {
+        UnavailableException(String message) {
+            super(message);
+        }
+    }
+
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -35,36 +43,58 @@ public class MyMemoryTranslator implements Translator {
     public Map<String, String> translate(List<WordEntry> words, String targetLang) throws Exception {
         Map<String, String> out = new LinkedHashMap<>();
         for (WordEntry w : words) {
-            String url = "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(w.word(), StandardCharsets.UTF_8)
-                    + "&langpair=" + URLEncoder.encode("en|" + targetLang, StandardCharsets.UTF_8);
-            HttpResponse<String> response = http.send(
-                    HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).GET().build(),
-                    HttpResponse.BodyHandlers.ofString());
-            JsonNode root = json.readTree(response.body());
-            if (response.statusCode() != 200 || root.path("quotaFinished").asBoolean(false)
-                    || root.path("responseStatus").asInt(200) != 200) {
-                System.err.println("MyMemory stopped at '" + w.word() + "': " + root.path("responseDetails").asText());
-                break; // quota or outage: the rest stay untranslated
-            }
-            List<String> variants = new ArrayList<>();
-            addVariant(variants, w.word(), root.path("responseData").path("translatedText").asText(""));
-            for (JsonNode match : root.path("matches")) {
-                if (match.path("quality").asInt(0) >= MIN_QUALITY) {
-                    addVariant(variants, w.word(), match.path("translation").asText(""));
-                }
+            List<String> variants;
+            try {
+                variants = lookup(w.word(), "en|" + targetLang);
+            } catch (UnavailableException e) {
+                System.err.println("MyMemory stopped at '" + w.word() + "': " + e.getMessage());
+                break; // the rest stay untranslated
             }
             if (!variants.isEmpty()) {
-                out.put(w.word(), String.join(", ", variants.subList(0, Math.min(3, variants.size()))));
+                out.put(w.word(), String.join(", ", variants));
             }
         }
         return out;
     }
 
-    private static void addVariant(List<String> variants, String word, String candidate) {
-        String c = candidate.strip();
-        if (!c.isEmpty() && !c.equalsIgnoreCase(word) && c.length() <= 80
-                && variants.stream().noneMatch(v -> v.equalsIgnoreCase(c))) {
-            variants.add(c.toLowerCase());
+    @Override
+    public String toEnglish(String text, String fromLang) throws Exception {
+        List<String> variants = lookup(text, fromLang + "|en");
+        return variants.isEmpty() ? null : String.join(", ", variants);
+    }
+
+    /** Main translation plus up to two high-quality alternatives, lower-cased, without the source text. */
+    private List<String> lookup(String text, String langPair) throws Exception {
+        String url = "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(text, StandardCharsets.UTF_8)
+                + "&langpair=" + URLEncoder.encode(langPair, StandardCharsets.UTF_8);
+        HttpResponse<String> response = http.send(
+                HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        JsonNode root = json.readTree(response.body());
+        if (response.statusCode() != 200 || root.path("quotaFinished").asBoolean(false)
+                || root.path("responseStatus").asInt(200) != 200) {
+            throw new UnavailableException(root.path("responseDetails").asText("HTTP " + response.statusCode()));
+        }
+        List<String> variants = new ArrayList<>();
+        addVariant(variants, text, root.path("responseData").path("translatedText").asText(""));
+        for (JsonNode match : root.path("matches")) {
+            if (match.path("quality").asInt(0) >= MIN_QUALITY) {
+                addVariant(variants, text, match.path("translation").asText(""));
+            }
+        }
+        return variants.subList(0, Math.min(3, variants.size()));
+    }
+
+    /**
+     * Keeps short dictionary-like translations only. MyMemory's translation memory also returns whole
+     * subtitle sentences, HTML entities and stray punctuation ("minor:"), which would confuse learners.
+     */
+    private static void addVariant(List<String> variants, String source, String candidate) {
+        String c = candidate.strip().replaceAll("^[\\p{Punct}\\s]+|[\\p{Punct}\\s]+$", "").toLowerCase();
+        boolean junk = c.isEmpty() || c.contains("&#") || c.contains("\n") || c.length() > 40
+                || c.split("\\s+").length > 4 || c.matches(".*[.!?;].*") || c.equalsIgnoreCase(source.strip());
+        if (!junk && !variants.contains(c)) {
+            variants.add(c);
         }
     }
 }

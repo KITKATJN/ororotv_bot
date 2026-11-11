@@ -332,6 +332,17 @@ public class Database implements AutoCloseable {
         }
     }
 
+    /** Remembers another accepted answer for a word (e.g. a synonym confirmed by back-translation). */
+    public synchronized void addTranslationVariant(long chatId, String wordKey, String variant) throws SQLException {
+        try (PreparedStatement ps = db.prepareStatement(
+                "UPDATE words SET translation = translation || ', ' || ? WHERE chat_id=? AND word_key=?")) {
+            ps.setString(1, variant);
+            ps.setLong(2, chatId);
+            ps.setString(3, wordKey);
+            ps.executeUpdate();
+        }
+    }
+
     // --------------------------------------------------------------- stats
 
     public synchronized UserStats userStats(long chatId) throws SQLException {
